@@ -1,89 +1,85 @@
-import dgram from "dgram";
+//TODO:  My system doesn't support IPv6 rn. fix it
+
+import dgram, { RemoteInfo } from "dgram";
 import dotenv from "dotenv";
-import { off } from "process";
-import { server } from "typescript";
 
 dotenv.config();
 
-const port = 53;
+const FORWARD_PORT = 53;
+const FORWARD_DNS_V4 = "8.8.8.8";
+const FORWARD_DNS_V6 = "2001:4860:4860::8888";
 
-const server4 = dgram.createSocket("udp4");
-const server6 = dgram.createSocket("udp6");
+const server= dgram.createSocket({type:"udp4",reuseAddr:true});
 
-// To parse msg recieved 
-const parseDomainName = (msg:Buffer, offset : number) : {name : string; nextOffset : number}=>{
-    let domain = "";
-    let length = msg[offset]
+// To parse msg recieved
+const parseDomainName = (
+  msg: Buffer,
+  offset: number
+): { name: string; nextOffset: number } => {
+  let domain = "";
+  let length = msg[offset];
 
-    while(length !==0){
-        domain +=msg.slice(offset+1,offset+1+length).toString("ascii")+".";
-        offset+=length+1;
-        length = msg[offset]
-    }
+  while (length !== 0) {
+    domain +=
+      msg.slice(offset + 1, offset + 1 + length).toString("ascii") + ".";
+    offset += length + 1;
+    length = msg[offset];
+  }
 
-    return {name : domain.slice(0,-1),nextOffset:offset+1}
+  return { name: domain.slice(0, -1), nextOffset: offset + 1 };
 };
 
+//Send reposne to google's dns resolver
+const handleMessage = (
+  msg: Buffer,
+  rinfo: RemoteInfo,
+  forwardDNS: string
+) => {
+  console.log(`Forwarding query from ${rinfo.address}:${rinfo.port}`);
+
+  const forwardSocket = dgram.createSocket("udp4");
+
+  forwardSocket.send(msg, FORWARD_PORT, forwardDNS, () => {
+    console.log(`Query sent to ${forwardDNS}`);
+  });
+
+  forwardSocket.on("message", (response) => {
+    console.log(`Sent resolved response to ${rinfo.address}:${rinfo.port}`);
+
+    server.send(response, rinfo.port, rinfo.address, () => {
+      console.log(`Sent resolved response to ${rinfo.address}:${rinfo.port}`);
+    });
+
+    setTimeout(()=>forwardSocket.close(),500);
+  });
+
+  forwardSocket.on("error", (err) => {
+    console.log(`Error forwarding DNS query : ${err.message}`);
+    forwardSocket.close();
+  });
+};
+
+//Message handler for both
 //msg is the actual data recieved
 // rinfo is the information about remote user
-server4.on("message",(msg,rinfo)=>{
-    // console.log(`Received DNS query from ${rinfo.address}:${rinfo.port}`)
-    // console.log(msg);
-    const transactionId = msg.slice(0,2);
-    const flags = msg.slice(2,4);
-    const  questionCount = msg.readUInt16BE(4);
-
-    let offset = 12;
-    let queries = [];
-
-    for(let i=0;i<questionCount;i++){
-        const {name, nextOffset}  =parseDomainName(msg, offset);
-        queries.push(name);
-        offset = nextOffset +4;
-    }
-
-    console.log(`Queries recieved: ${queries.join(", ")}`)
-
-    let responseSections = [];
-
-    for(const domain of queries){
-        responseSections.push(Buffer.concat([
-            Buffer.from([0xC0, 0x0C]),
-            Buffer.from([0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x3c, 0x00, 0x04]),
-            Buffer.from([1, 2, 3, 4])
-        ]))
-    }
-
-    const response = Buffer.concat([
-        transactionId,
-        Buffer.from([0x81, 0x80]), // Flags (Standard response, recursion available)
-        msg.slice(4, 6), // Original QDCOUNT
-        Buffer.from([(questionCount >> 8) & 0xff, questionCount & 0xff]), // ANCOUNT (same as QDCOUNT)
-        Buffer.from([0x00, 0x00]), // NSCOUNT
-        Buffer.from([0x00, 0x00]), // ARCOUNT
-        msg.slice(12, offset), // Question Section
-        ...responseSections // All answer sections
-    ]);
-
-    // const {name : domain,nextOffset} = parseDomainName(msg,12);
-
-    // console.log(`Received query for : ${domain}`)
-
-    server4.send(response,rinfo.port, rinfo.address,()=>{
-        console.log(`Sent response to ${rinfo.address}:${rinfo.port}`)
-    })
-})
-
-server6.on("message",(msg,rinfo)=>{
-    console.log(`Received DNS query from ${rinfo.address}:${rinfo.port}`)
-    console.log(msg);
-})
 
 
-server4.bind(port, "0.0.0.0", () => {
-  console.log("DNS server running on IPv4 (UDP)");
+server.on("message", (msg, rinfo) => {
+    if(msg.length<12){
+        console.error(`Received invalid DNS packet from ${rinfo.address}:${rinfo.port}`);
+        return;
+    }  
+    handleMessage(msg, rinfo, FORWARD_DNS_V4);
 });
 
-server6.bind(port, "::", () => {
-  console.log("DNS server running on IPv6 (UDP)");
+
+server.on("error",(err)=>{
+    console.log(`Server Error: ${err.message}`);
+
+})
+
+// Start servers
+server.bind(53, "0.0.0.0", () => {
+  console.log("DNS server running on IPv4/IPv6 (UDP)");
 });
+
